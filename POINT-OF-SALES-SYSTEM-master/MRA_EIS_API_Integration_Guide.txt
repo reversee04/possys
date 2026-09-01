@@ -1,0 +1,2192 @@
+MRA EIS API INTEGRATION GUIDE
+For a C# / .NET Retail POS Application
+
+Version: 1.0
+Date: 25 August 2026
+
+======================================================================
+1. PURPOSE OF THIS GUIDE
+======================================================================
+
+This guide explains how to integrate a Retail POS application with the
+Malawi Revenue Authority (MRA) Electronic Invoicing System (EIS) API.
+
+The guide is based on the EIS workflow and endpoint descriptions provided
+for this project. It focuses on a C#/.NET POS application using:
+
+- C#
+- .NET / ASP.NET Core concepts
+- Entity Framework Core
+- HTTP/REST APIs
+- JSON
+- A local database such as SQLite or SQL Server
+
+IMPORTANT:
+The endpoint names, URLs, request fields, response fields, HTTP methods,
+headers, authentication rules, error codes, and cryptographic/QR
+algorithms must be taken from the official MRA EIS API documentation.
+Where this guide gives example C# classes or pseudocode, those examples
+are architectural examples and must be adjusted to the exact MRA schema.
+
+======================================================================
+2. OVERALL EIS INTEGRATION
+======================================================================
+
+The POS should be designed as two connected systems:
+
+    NORMAL POS
+    ------------------------------------------------
+    Products
+    Customers
+    Cart
+    Sales
+    Payments
+    Receipts
+    Inventory
+    ------------------------------------------------
+
+                    |
+                    v
+
+    EIS INTEGRATION LAYER
+    ------------------------------------------------
+    EIS API Client
+    Terminal Activation
+    Configuration
+    Sales Submission
+    Offline Queue
+    QR Generation
+    Product Status
+    Ping / Health
+    Reconciliation
+    Terminal Blocking
+    Inventory Upload
+    ------------------------------------------------
+
+                    |
+                    v
+
+    MRA EIS API
+    ------------------------------------------------
+    Onboarding
+    Configuration
+    Sales
+    Utilities
+    ------------------------------------------------
+
+
+The most important design principle is:
+
+    POS UI
+       |
+       v
+    EIS Services
+       |
+       v
+    EIS API Client
+       |
+       v
+    MRA EIS API
+
+Do NOT put MRA HTTP calls directly inside every XAML window.
+
+======================================================================
+3. MAIN EIS MODULES
+======================================================================
+
+The EIS API can be understood as four major groups.
+
+3.1 ONBOARDING
+
+Used when a terminal is activated for the first time.
+
+Main operations:
+
+- Terminal Activation
+- Terminal Activated Confirmation
+
+The Terminal Activation Code (TAC) is entered by the taxpayer/user.
+The POS sends it to MRA. MRA validates it and returns the terminal's
+initial configuration.
+
+The POS must save that configuration locally before confirming activation.
+
+After confirmation, the TAC expires and should not be used again.
+
+--------------------------------------------------
+
+3.2 CONFIGURATION
+
+Used to retrieve the latest configuration from MRA.
+
+The configuration contains three important areas:
+
+A. Global configuration
+   - Tax rates
+   - MRA-controlled global settings
+   - Other global parameters
+
+B. Terminal configuration
+   - Terminal label
+   - Active status
+   - Trading name
+   - Email
+   - Phone
+   - Address
+   - Terminal site
+   - Offline transaction limits
+
+C. Taxpayer configuration
+   - TIN
+   - VAT registration status
+   - Tax office
+   - Activated tax rates
+   - Levies
+
+The POS should retrieve configuration:
+
+- At terminal startup/restart
+- At the beginning of the business day
+- When MRA indicates that configuration has changed
+- At any additional interval required by the official specification
+
+--------------------------------------------------
+
+3.3 SALES
+
+The sales module has three main operations:
+
+1. Submit Sales Transaction
+2. Last Submitted Online Transaction
+3. Last Submitted Offline Transaction
+
+Every receipt generated during normal online operation must be
+submitted to MRA according to the EIS requirements.
+
+MRA returns an invoice validation signature/data that must be handled
+according to the official specification and represented as the required
+QR code on the receipt.
+
+For certified offline terminals, eligible transactions can be queued
+locally and submitted later when connectivity is restored.
+
+--------------------------------------------------
+
+3.4 UTILITIES
+
+The provided utility endpoints are:
+
+1. Ping
+2. Product Status
+3. Taxpayer Initial Inventory Upload
+4. Get Terminal Site or Branch Products and Services
+5. VAT 5 Certificate Validation
+6. Get Terminal Blocking Message
+7. Check Terminal Unblock Status
+
+These should be implemented as separate services rather than mixed into
+the sales code.
+
+======================================================================
+4. RECOMMENDED PROJECT STRUCTURE
+======================================================================
+
+A recommended C# project structure is:
+
+RetailPOS
+|
++-- Data
+|   +-- AppDbContext.cs
+|
++-- Models
+|   +-- Product.cs
+|   +-- Sale.cs
+|   +-- SaleItem.cs
+|   +-- Customer.cs
+|   |
+|   +-- EIS
+|       +-- TerminalConfiguration.cs
+|       +-- GlobalConfiguration.cs
+|       +-- TaxpayerConfiguration.cs
+|       +-- TaxRate.cs
+|       +-- TerminalSite.cs
+|       +-- OfflineLimit.cs
+|       +-- EISTransaction.cs
+|       +-- OfflineTransaction.cs
+|
++-- DTOs
+|   |
+|   +-- EIS
+|       +-- ActivationRequest.cs
+|       +-- ActivationResponse.cs
+|       +-- ActivationConfirmationRequest.cs
+|       +-- ConfigurationResponse.cs
+|       +-- SaleRequest.cs
+|       +-- SaleResponse.cs
+|       +-- ProductStatusRequest.cs
+|       +-- ProductStatusResponse.cs
+|       +-- PingResponse.cs
+|
++-- Services
+|   |
+|   +-- EIS
+|       +-- IEISApiClient.cs
+|       +-- EISApiClient.cs
+|       +-- ITerminalActivationService.cs
+|       +-- TerminalActivationService.cs
+|       +-- IConfigurationService.cs
+|       +-- ConfigurationService.cs
+|       +-- IEISSalesService.cs
+|       +-- EISSalesService.cs
+|       +-- IOfflineQueueService.cs
+|       +-- OfflineQueueService.cs
+|       +-- IPingService.cs
+|       +-- PingService.cs
+|       +-- IProductStatusService.cs
+|       +-- ProductStatusService.cs
+|       +-- IInventoryService.cs
+|       +-- InventoryService.cs
+|       +-- IReconciliationService.cs
+|       +-- ReconciliationService.cs
+|
++-- Views
+|   +-- LoginWindow.xaml
+|   +-- Dashboard.xaml
+|   +-- TerminalActivation.xaml
+|   +-- Sales.xaml
+|   +-- Products.xaml
+|   +-- Settings.xaml
+|
++-- ViewModels
+    +-- TerminalActivationViewModel.cs
+    +-- SalesViewModel.cs
+    +-- DashboardViewModel.cs
+
+======================================================================
+5. CONFIGURE THE MRA API
+======================================================================
+
+Put the MRA EIS base URL in configuration instead of hardcoding it
+throughout the application.
+
+Example appsettings.json:
+
+{
+  "EIS": {
+    "BaseUrl": "https://eis-api.mra.mw"
+  }
+}
+
+The exact production/test environment URL should be confirmed from MRA.
+
+If separate test and production environments are supplied, configure
+them separately.
+
+Example:
+
+{
+  "EIS": {
+    "BaseUrl": "...",
+    "Environment": "Test"
+  }
+}
+
+Never commit terminal secrets or security keys into source control.
+
+======================================================================
+6. CREATE THE EIS API CLIENT
+======================================================================
+
+Create:
+
+Services/EIS/EISApiClient.cs
+
+The API client should be responsible for:
+
+- Creating HTTP requests
+- Adding authorization
+- Sending requests
+- Reading HTTP responses
+- Deserializing JSON
+- Handling common API errors
+- Logging useful technical information
+
+Example architecture:
+
+public class EISApiClient
+{
+    private readonly HttpClient _httpClient;
+
+    public EISApiClient(HttpClient httpClient)
+    {
+        _httpClient = httpClient;
+    }
+}
+
+Do not place all endpoint-specific business logic inside this class.
+
+Instead:
+
+TerminalActivationService
+ConfigurationService
+EISSalesService
+ProductStatusService
+
+should use the API client.
+
+======================================================================
+7. TERMINAL ONBOARDING / ACTIVATION
+======================================================================
+
+The onboarding process begins when a taxpayer obtains a Terminal
+Activation Code (TAC) from the MRA EIS Portal.
+
+The user enters the TAC into the POS.
+
+Flow:
+
+    User enters TAC
+          |
+          v
+    POS activation screen
+          |
+          v
+    TerminalActivationService
+          |
+          v
+    EISApiClient
+          |
+          v
+    MRA Terminal Activation Endpoint
+          |
+          v
+    MRA validates TAC
+          |
+          v
+    Configuration returned
+          |
+          v
+    POS saves configuration
+          |
+          v
+    POS sends activation confirmation
+          |
+          v
+    MRA flags terminal as activated
+
+CRITICAL RULE:
+
+Do not send the activation confirmation before the returned
+configuration has been successfully persisted locally.
+
+If saving the configuration fails, do not tell the user that activation
+is complete.
+
+======================================================================
+8. ACTIVATION SCREEN
+======================================================================
+
+Create a screen similar to:
+
+    -----------------------------------------
+             TERMINAL ACTIVATION
+
+    Terminal Activation Code
+
+    [_______________________________]
+
+              [ ACTIVATE ]
+
+    Status:
+    Waiting for activation...
+    -----------------------------------------
+
+The screen should show useful states:
+
+- Enter TAC
+- Activating...
+- Activation successful
+- Invalid TAC
+- Network error
+- Configuration save failed
+- Activation confirmation failed
+
+Do not expose security keys or sensitive configuration information
+directly to the user.
+
+======================================================================
+9. ACTIVATION RESPONSE STORAGE
+======================================================================
+
+The activation response contains configuration that the POS needs for
+subsequent communication.
+
+Store information such as:
+
+TerminalConfiguration:
+- Terminal label
+- Active status
+- Email
+- Phone
+- Trading name
+- Address lines
+- Terminal site
+- Offline limits
+- Version number
+
+TaxpayerConfiguration:
+- TIN
+- VAT registration status
+- Tax office
+- Activated tax rate IDs
+- Activated tax rates
+- Activated levies
+- Version number
+
+GlobalConfiguration:
+- Configuration ID
+- Version number
+- Tax rates
+
+Security material supplied by MRA must be stored securely and exactly
+according to the MRA security requirements.
+
+======================================================================
+10. ENTITY FRAMEWORK CORE DATABASE
+======================================================================
+
+A simplified terminal configuration entity could look like:
+
+public class TerminalConfiguration
+{
+    public int Id { get; set; }
+
+    public string TerminalLabel { get; set; }
+
+    public bool IsActiveTerminal { get; set; }
+
+    public string EmailAddress { get; set; }
+
+    public string PhoneNumber { get; set; }
+
+    public string TradingName { get; set; }
+
+    public string SiteId { get; set; }
+
+    public string SiteName { get; set; }
+
+    public int VersionNo { get; set; }
+
+    public int MaxTransactionAgeInHours { get; set; }
+
+    public decimal MaxCumulativeAmount { get; set; }
+}
+
+The exact property types should be adjusted to the actual MRA schema.
+
+======================================================================
+11. ACTIVATION CONFIRMATION
+======================================================================
+
+After successfully saving the configuration:
+
+    Save configuration
+          |
+          v
+    Verify save succeeded
+          |
+          v
+    Send activation confirmation
+          |
+          v
+    MRA marks terminal activated
+          |
+          v
+    Store local activated state
+          |
+          v
+    Display "Terminal successfully activated"
+
+If confirmation fails, the POS should not incorrectly show the terminal
+as fully activated.
+
+The activation process should be retryable where the MRA specification
+allows it.
+
+Because the TAC expires after successful confirmation, do not create
+logic that repeatedly submits the same TAC without understanding the
+actual activation state.
+
+======================================================================
+12. GET LATEST CONFIGURATION
+======================================================================
+
+Once activated, the terminal must keep its configuration current.
+
+The documentation says Get Latest Configuration should be called:
+
+- When the terminal starts/restarts
+- At the beginning of the business day
+- When a sale response indicates that configuration has changed
+
+The response contains:
+
+globalConfiguration
+terminalConfiguration
+taxpayerConfiguration
+
+Example response structure:
+
+{
+  "statusCode": 0,
+  "remark": "string",
+  "data": {
+    "globalConfiguration": {
+      "id": 0,
+      "versionNo": 0,
+      "taxrates": []
+    },
+    "terminalConfiguration": {
+      "versionNo": 0,
+      "terminalLabel": "string",
+      "isActiveTerminal": true,
+      "emailAddress": "string",
+      "phoneNumber": "string",
+      "tradingName": "string",
+      "addressLines": [],
+      "terminalSite": {},
+      "offlineLimit": {}
+    },
+    "taxpayerConfiguration": {
+      "versionNo": 0,
+      "tin": "string",
+      "isVATRegistered": true,
+      "taxOfficeCode": "string",
+      "taxOffice": {},
+      "activatedTaxRateIds": [],
+      "activatedTaxrates": [],
+      "activatedLevies": []
+    }
+  }
+}
+
+The exact response model should match the official API documentation.
+
+======================================================================
+13. CONFIGURATION VERSIONING
+======================================================================
+
+Store version numbers locally.
+
+For example:
+
+Global configuration version:    5
+Terminal configuration version:  3
+Taxpayer configuration version: 7
+
+After Get Latest Configuration:
+
+Global configuration version:    6
+Terminal configuration version:  3
+Taxpayer configuration version: 7
+
+The POS should replace/update the relevant configuration.
+
+Do not assume tax rates are permanently fixed.
+
+MRA may change configuration, and the POS must apply the latest valid
+configuration.
+
+======================================================================
+14. SHOULD DOWNLOAD LATEST CONFIG
+======================================================================
+
+After submitting a sale, the MRA response may indicate:
+
+shouldDownloadLatestConfig = true
+
+This means the POS must call Get Latest Configuration.
+
+Flow:
+
+    Submit Sale
+        |
+        v
+    MRA response
+        |
+        v
+    shouldDownloadLatestConfig?
+        |
+       YES
+        |
+        v
+    Get Latest Configuration
+        |
+        v
+    Save configuration
+        |
+        v
+    Continue operating
+
+This flag must not be ignored.
+
+======================================================================
+15. SALES MODULE
+======================================================================
+
+The sales module contains:
+
+1. Submit Sales Transaction
+2. Last Submitted Online Transaction
+3. Last Submitted Offline Transaction
+
+The normal online sales flow is:
+
+    Customer buys products
+          |
+          v
+    POS calculates transaction
+          |
+          v
+    Save local sale
+          |
+          v
+    Submit sale to MRA
+          |
+          v
+    Receive MRA response
+          |
+          v
+    Process invoice validation information
+          |
+          v
+    Generate required QR representation
+          |
+          v
+    Print receipt
+
+Every sale should have a clear local status.
+
+Example:
+
+    Created
+    Pending
+    Submitted
+    Failed
+    Offline
+    Syncing
+    Synced
+    RequiresReview
+
+Use status values that make sense for your implementation and
+reconciliation process.
+
+======================================================================
+16. WHY SAVE THE SALE LOCALLY FIRST?
+======================================================================
+
+A power failure or application crash can happen during communication.
+
+Example:
+
+    POS sends invoice
+          |
+          v
+    MRA receives invoice
+          |
+          X
+    POS crashes before receiving response
+
+The POS cannot simply assume the invoice failed.
+
+This is why the Last Submitted Online Transaction endpoint is useful.
+
+A robust flow is:
+
+    Save sale locally
+          |
+          v
+    Submit to MRA
+          |
+          v
+    Response received?
+       /       \
+     YES        NO
+      |          |
+      v          v
+   Process     Reconcile
+   response    before retrying
+
+Do not blindly submit a duplicate invoice when the result is uncertain.
+
+======================================================================
+17. EIS SALE DTO
+======================================================================
+
+Create a separate DTO for the MRA request.
+
+Example only:
+
+public class EISSaleRequest
+{
+    public string InvoiceNumber { get; set; }
+
+    public DateTime TransactionDate { get; set; }
+
+    public string Tin { get; set; }
+
+    public decimal TotalAmount { get; set; }
+
+    public List<EISSaleItem> Items { get; set; }
+}
+
+public class EISSaleItem
+{
+    public string ProductCode { get; set; }
+
+    public string Description { get; set; }
+
+    public decimal Quantity { get; set; }
+
+    public decimal UnitPrice { get; set; }
+
+    public decimal TaxAmount { get; set; }
+}
+
+IMPORTANT:
+
+This is only an architectural example.
+
+The actual MRA sale request must contain exactly the fields and formats
+specified by the official Submit Sales Transaction documentation.
+
+======================================================================
+18. ONLINE SALE RESPONSE
+======================================================================
+
+The MRA response should be stored against the local transaction.
+
+Depending on the official schema, this may include:
+
+- MRA status
+- Invoice/reference information
+- Validation signature
+- QR-related data
+- Error information
+- shouldDownloadLatestConfig
+
+A conceptual database record could contain:
+
+    Sale ID
+    Invoice Number
+    MRA Reference
+    Submission Status
+    Submitted At
+    Validation Data
+    QR Data
+    Error Code
+    Error Message
+
+Store enough information to support auditing and troubleshooting.
+
+======================================================================
+19. QR CODE GENERATION
+======================================================================
+
+For online transactions:
+
+    MRA sale response
+          |
+          v
+    Invoice validation information
+          |
+          v
+    POS converts it according to MRA specification
+          |
+          v
+    QR Code
+          |
+          v
+    Receipt
+
+Do not invent the QR payload format.
+
+Use the exact data/encoding requirements provided by MRA.
+
+For offline-certified terminals, MRA provides a lightweight mechanism
+using terminal-specific security material. The exact algorithm and key
+handling must be implemented exactly as specified by MRA.
+
+Never replace the required MRA mechanism with a random QR code, simple
+Base64 encoding, or an arbitrary hash.
+
+======================================================================
+20. OFFLINE SALES
+======================================================================
+
+Offline functionality is only for terminals certified/allowed by MRA.
+
+When connectivity is unavailable:
+
+    Sale
+      |
+      v
+    MRA request fails
+      |
+      v
+    Check whether terminal is allowed to operate offline
+      |
+      v
+    Check offline limits
+      |
+      +----------------------------+
+      |                            |
+      v                            v
+    Allowed                    Not allowed
+      |                            |
+      v                            v
+    Queue transaction          Stop/handle
+      |                        according to
+      v                        MRA rules
+    Generate required
+    offline validation data
+      |
+      v
+    Print receipt
+
+Do not assume that any API failure automatically authorizes offline
+sales.
+
+======================================================================
+21. OFFLINE LIMITS
+======================================================================
+
+The configuration contains:
+
+maxTransactionAgeInHours
+maxCummulativeAmount
+
+These should be read from the MRA terminal configuration.
+
+Conceptually:
+
+    Can transaction go offline?
+
+             |
+             v
+    Offline operation allowed?
+             |
+             v
+    Transaction within age limit?
+             |
+             v
+    Cumulative offline amount
+    within configured limit?
+             |
+             v
+           YES
+             |
+             v
+       Queue transaction
+
+Do not hardcode these values.
+
+======================================================================
+22. OFFLINE TRANSACTION DATABASE
+======================================================================
+
+Create an offline transaction table.
+
+Example:
+
+public class OfflineTransaction
+{
+    public int Id { get; set; }
+
+    public int SaleId { get; set; }
+
+    public string InvoiceNumber { get; set; }
+
+    public string Status { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime? SubmittedAt { get; set; }
+
+    public int RetryCount { get; set; }
+
+    public string LastError { get; set; }
+}
+
+You may also store the exact serialized payload or a secure/auditable
+representation if required by your design and MRA rules.
+
+======================================================================
+23. OFFLINE QUEUE
+======================================================================
+
+Example:
+
+    OfflineTransactions
+
+    ID       Invoice       Status
+    --------------------------------
+    1        INV-001       Pending
+    2        INV-002       Pending
+    3        INV-003       Synced
+
+When connectivity returns:
+
+    Detect connection
+          |
+          v
+    Ping MRA
+          |
+          v
+    Find pending transactions
+          |
+          v
+    Submit according to MRA rules
+          |
+          v
+    Receive response
+          |
+          v
+    Mark successfully submitted
+          |
+          v
+    Keep audit history
+
+Do not delete successful offline transaction records immediately.
+
+======================================================================
+24. LAST SUBMITTED ONLINE TRANSACTION
+======================================================================
+
+This endpoint is especially important after uncertain communication.
+
+Example:
+
+    POS creates INV-1005
+          |
+          v
+    POS submits to MRA
+          |
+          v
+    Power failure / application crash
+          |
+          v
+    POS restarts
+          |
+          v
+    Local transaction is uncertain
+          |
+          v
+    Query Last Submitted Online Transaction
+          |
+          v
+    Compare MRA result with local invoice
+          |
+          v
+    Reconcile
+
+This helps prevent duplicate submissions.
+
+The exact comparison fields should follow the official API response.
+
+======================================================================
+25. LAST SUBMITTED OFFLINE TRANSACTION
+======================================================================
+
+This endpoint retrieves the latest offline transaction submitted by the
+terminal.
+
+It can be used during offline queue reconciliation.
+
+Example:
+
+    Offline Queue
+         |
+         v
+    Submit pending transaction
+         |
+         v
+    Submission uncertain
+         |
+         v
+    Query Last Submitted Offline Transaction
+         |
+         v
+    Compare with local transaction
+         |
+         v
+    Resolve status
+
+======================================================================
+26. PING UTILITY
+======================================================================
+
+Ping is a health-check endpoint.
+
+It can be used to determine whether the MRA API is reachable and
+responsive.
+
+Example:
+
+    POS
+     |
+     v
+    Ping
+     |
+     +---- Success ----> MRA available
+     |
+     +---- Failure ----> MRA unavailable
+
+Use it for:
+
+- Startup health checks
+- Dashboard status
+- Monitoring
+- Offline queue processing
+- Troubleshooting
+
+Example dashboard:
+
+    MRA EIS
+    --------------------
+    API:       ONLINE
+    Terminal:  ACTIVE
+    Config:    CURRENT
+    Queue:     0
+    --------------------
+
+IMPORTANT:
+
+A successful Ping does not guarantee that a subsequent sale request
+will succeed. Connectivity can change between requests.
+
+======================================================================
+27. PRODUCT STATUS
+======================================================================
+
+Product Status is useful for checking whether a POS product is mapped
+to an MRA standardized category/code and for obtaining applicable stock
+information returned by the API.
+
+A conceptual flow:
+
+    POS Product
+         |
+         v
+    Product Status request
+         |
+         v
+    MRA
+         |
+         v
+    Mapping status
+    Category information
+    Stock information
+         |
+         v
+    Update/display POS information
+
+Possible UI:
+
+    Product: Example Product
+
+    MRA Mapping: Mapped
+    Category:    [returned MRA category]
+    Stock:       [returned MRA stock information]
+
+Use the exact request/response fields from the MRA Product Status
+documentation.
+
+======================================================================
+28. TERMINAL SITE / BRANCH PRODUCTS AND SERVICES
+======================================================================
+
+This utility retrieves products and services associated with the
+terminal site or branch.
+
+Possible use:
+
+    MRA
+     |
+     v
+    Terminal Site Products
+     |
+     v
+    POS Product Catalogue
+
+You should decide whether the POS:
+
+- Downloads products during setup
+- Synchronizes them periodically
+- Allows local products in addition to MRA-managed products
+- Uses MRA product identifiers for sales
+
+The exact business rules should be confirmed from the EIS
+documentation.
+
+======================================================================
+29. TAXPAYER INITIAL INVENTORY UPLOAD
+======================================================================
+
+This utility is intended to upload the taxpayer's initial inventory.
+
+A possible process is:
+
+    Existing POS inventory
+          |
+          v
+    Validate/transform data
+          |
+          v
+    Initial inventory request
+          |
+          v
+    MRA
+          |
+          v
+    Response
+          |
+          v
+    Record result locally
+
+Do not upload duplicate initial inventory data without checking the
+official API rules for idempotency and repeat submissions.
+
+======================================================================
+30. VAT 5 CERTIFICATE VALIDATION
+======================================================================
+
+The utilities include VAT 5 Certificate Validation.
+
+A POS can provide a suitable UI where a user enters the information
+required by MRA and the POS sends it to the validation endpoint.
+
+Possible flow:
+
+    User enters certificate information
+          |
+          v
+    POS validates basic input
+          |
+          v
+    MRA VAT 5 validation
+          |
+          v
+    Display result
+
+The exact request fields and validation response must follow the MRA
+documentation.
+
+======================================================================
+31. TERMINAL BLOCKING
+======================================================================
+
+The utilities include:
+
+- Get Terminal Blocking Message
+- Check Terminal Unblock Status
+
+These should be treated as compliance/security-related functions.
+
+The POS should not simply ignore a blocking message.
+
+A possible architecture is:
+
+    POS startup
+       |
+       v
+    Check terminal status/message
+       |
+       +---- Blocked ----> Display blocking message
+       |
+       +---- Active -----> Continue
+       |
+       v
+    Check unblock status when appropriate
+
+The exact behaviour when a terminal is blocked must follow MRA rules.
+
+Do not create your own mechanism that bypasses an MRA terminal block.
+
+======================================================================
+32. COMPLETE POS STARTUP FLOW
+======================================================================
+
+A recommended startup sequence is:
+
+    APPLICATION START
+           |
+           v
+    Load local database
+           |
+           v
+    Is terminal activated?
+       /           \
+     NO             YES
+     |               |
+     v               v
+ Activation       Get Latest
+ Screen            Config
+     |               |
+     v               v
+ Activate          Save/update
+ Terminal          configuration
+     |               |
+     +-------+-------+
+             |
+             v
+        Ping MRA
+             |
+             v
+    Check terminal status/
+    blocking information
+             |
+             v
+       Start POS
+             |
+             v
+      READY FOR SALES
+
+The exact order of blocking/status checks should be adjusted to MRA's
+official requirements.
+
+======================================================================
+33. COMPLETE ONLINE SALE FLOW
+======================================================================
+
+    CASHIER
+       |
+       v
+    Select products
+       |
+       v
+    Calculate totals
+       |
+       v
+    Create local sale
+       |
+       v
+    Save local transaction
+       |
+       v
+    Submit Sales Transaction
+       |
+       v
+    MRA
+       |
+       v
+    Response
+       |
+       +-------------------------+
+       |                         |
+       v                         v
+    Success                 Error/Failure
+       |                         |
+       v                         v
+    Store response          Determine whether
+       |                    offline processing
+       |                    is permitted
+       v                         |
+    Check                      |
+    shouldDownload...          |
+       |                         |
+       v                         v
+    Download config       Offline queue
+    if required           if eligible
+       |                         |
+       +------------+------------+
+                    |
+                    v
+             Generate required QR
+                    |
+                    v
+             Print receipt
+                    |
+                    v
+             Complete transaction
+
+======================================================================
+34. HANDLING POWER FAILURE / CRASH
+======================================================================
+
+A common real-world problem is:
+
+    1. POS creates invoice
+    2. POS sends request
+    3. MRA receives request
+    4. POS loses power
+    5. POS never receives response
+
+When the POS restarts:
+
+    Load incomplete local transactions
+             |
+             v
+    Identify uncertain transactions
+             |
+             v
+    Query Last Submitted Online Transaction
+             |
+             v
+    Compare response
+             |
+       +-----+------+
+       |            |
+     Found        Not found
+       |            |
+       v            v
+    Mark as       Follow official
+    submitted     retry/reconciliation
+                  rules
+             |
+             v
+         Continue
+
+This is safer than simply resending everything.
+
+======================================================================
+35. DATABASE STATUS DESIGN
+======================================================================
+
+For sales, use clear states.
+
+Example:
+
+    Pending
+       |
+       v
+    Submitting
+       |
+       +-------> Submitted
+       |
+       +-------> OfflineQueued
+       |
+       +-------> Failed
+       |
+       +-------> Unknown
+                    |
+                    v
+               Reconciliation
+                    |
+             +------+------+
+             |             |
+             v             v
+          Submitted     Retry/Review
+
+The "Unknown" state is useful for cases where the POS cannot determine
+whether MRA received the transaction.
+
+======================================================================
+36. ERROR HANDLING
+======================================================================
+
+Your EIS integration must distinguish between:
+
+A. Network errors
+   - Internet unavailable
+   - Timeout
+   - DNS failure
+   - Connection reset
+
+B. HTTP errors
+   - 400
+   - 401
+   - 403
+   - 404
+   - 500
+   - etc.
+
+C. MRA business errors
+   - Invalid data
+   - Invalid TAC
+   - Invalid configuration
+   - Invalid tax information
+   - Terminal not active
+   - Other EIS-specific errors
+
+D. Local errors
+   - Database unavailable
+   - Failed configuration save
+   - QR generation error
+   - Receipt printer error
+
+Do not treat all errors as "offline".
+
+For example:
+
+    Invalid sale data
+          !=
+    Internet unavailable
+
+An invalid sale should not automatically be placed into the offline
+queue.
+
+======================================================================
+37. LOGGING
+======================================================================
+
+Create an EIS integration log.
+
+Example:
+
+    EISLogs
+
+    Id
+    Timestamp
+    Operation
+    InvoiceNumber
+    Status
+    ErrorCode
+    ErrorMessage
+    Correlation/Reference
+    DurationMs
+
+Examples of operations:
+
+    TERMINAL_ACTIVATION
+    ACTIVATION_CONFIRMATION
+    GET_CONFIGURATION
+    SUBMIT_SALE
+    LAST_ONLINE_TRANSACTION
+    LAST_OFFLINE_TRANSACTION
+    PING
+    PRODUCT_STATUS
+    INVENTORY_UPLOAD
+    VAT5_VALIDATION
+    BLOCKING_MESSAGE
+    UNBLOCK_STATUS
+
+Do not log sensitive security keys, tokens, passwords, or confidential
+personal information unnecessarily.
+
+======================================================================
+38. SECURITY
+======================================================================
+
+Security is extremely important because the terminal receives
+authentication/security information from MRA.
+
+Follow these rules:
+
+1. Use HTTPS.
+2. Do not hardcode credentials.
+3. Do not store secrets in Git.
+4. Do not display security keys in the UI.
+5. Protect local configuration.
+6. Restrict access to the terminal database.
+7. Log operations without logging sensitive secrets.
+8. Use the exact MRA authentication mechanism.
+9. Follow MRA's key-management requirements.
+10. Do not invent cryptographic algorithms.
+
+For a production POS, consider protected OS storage or another
+appropriate secure secret-storage mechanism for sensitive material,
+subject to MRA's requirements.
+
+======================================================================
+39. ENTITY FRAMEWORK CORE DATABASE TABLES
+======================================================================
+
+A practical starting database could include:
+
+    TerminalConfiguration
+    GlobalConfiguration
+    TaxpayerConfiguration
+    TaxRate
+    Levy
+    TaxOffice
+    TerminalSite
+
+    Product
+    Sale
+    SaleItem
+    Payment
+
+    EISTransaction
+    OfflineTransaction
+    EISLog
+
+    ApplicationSetting
+
+Possible relationships:
+
+    TerminalConfiguration
+             |
+             +---- TerminalSite
+
+    TaxpayerConfiguration
+             |
+             +---- TaxOffice
+             |
+             +---- TaxRate
+             |
+             +---- Levy
+
+    Sale
+      |
+      +---- SaleItem
+
+    Sale
+      |
+      +---- EISTransaction
+                    |
+                    +---- OfflineTransaction (when applicable)
+
+======================================================================
+40. EIS TRANSACTION TABLE
+======================================================================
+
+A useful EISTransaction entity can keep the relationship between a local
+POS sale and MRA.
+
+Conceptual example:
+
+public class EISTransaction
+{
+    public int Id { get; set; }
+
+    public int SaleId { get; set; }
+
+    public string InvoiceNumber { get; set; }
+
+    public string Status { get; set; }
+
+    public string MRAReference { get; set; }
+
+    public DateTime? SubmittedAt { get; set; }
+
+    public string ValidationData { get; set; }
+
+    public string QRData { get; set; }
+
+    public string ErrorCode { get; set; }
+
+    public string ErrorMessage { get; set; }
+}
+
+Again, adapt this to your exact API and database requirements.
+
+======================================================================
+41. SERVICE RESPONSIBILITIES
+======================================================================
+
+EISApiClient
+-------------
+Only handles common HTTP/API communication.
+
+TerminalActivationService
+--------------------------
+Handles:
+
+- TAC
+- Activation
+- Configuration persistence
+- Activation confirmation
+
+ConfigurationService
+--------------------
+Handles:
+
+- Get Latest Configuration
+- Configuration versions
+- Configuration updates
+
+EISSalesService
+---------------
+Handles:
+
+- Mapping POS sale to EIS request
+- Submit Sales Transaction
+- Processing sale response
+- shouldDownloadLatestConfig
+
+OfflineQueueService
+-------------------
+Handles:
+
+- Offline eligibility
+- Queue
+- Retry
+- Synchronization
+
+ReconciliationService
+---------------------
+Handles:
+
+- Last Submitted Online Transaction
+- Last Submitted Offline Transaction
+- Unknown transactions
+- Duplicate prevention
+
+PingService
+-----------
+Handles MRA health checks.
+
+ProductStatusService
+---------------------
+Handles product mapping/status queries.
+
+InventoryService
+-----------------
+Handles initial inventory upload and related inventory operations.
+
+======================================================================
+42. DEPENDENCY INJECTION
+======================================================================
+
+Register your EIS services through dependency injection.
+
+Conceptually:
+
+services.AddHttpClient<EISApiClient>();
+
+services.AddScoped<TerminalActivationService>();
+services.AddScoped<ConfigurationService>();
+services.AddScoped<EISSalesService>();
+services.AddScoped<OfflineQueueService>();
+services.AddScoped<ReconciliationService>();
+services.AddScoped<PingService>();
+services.AddScoped<ProductStatusService>();
+services.AddScoped<InventoryService>();
+
+The exact registration depends on whether your POS is WPF, WinForms,
+ASP.NET Core, or another .NET application.
+
+======================================================================
+43. WHY INTERFACES ARE USEFUL
+======================================================================
+
+Instead of:
+
+    EISSalesService
+
+you can define:
+
+    IEISSalesService
+
+and implement:
+
+    EISSalesService : IEISSalesService
+
+This helps with:
+
+- Testing
+- Dependency injection
+- Replacing implementations
+- Cleaner architecture
+
+Example:
+
+public interface IEISSalesService
+{
+    Task SubmitSaleAsync(int saleId);
+}
+
+Then:
+
+public class EISSalesService : IEISSalesService
+{
+    public async Task SubmitSaleAsync(int saleId)
+    {
+        // implementation
+    }
+}
+
+======================================================================
+44. DASHBOARD MONITORING
+======================================================================
+
+Your POS dashboard should ideally display EIS status.
+
+Example:
+
+    -------------------------------------------
+                EIS STATUS
+    -------------------------------------------
+
+    MRA API                 ONLINE
+    Terminal                ACTIVE
+    Configuration           CURRENT
+    Last Config Sync        10:02
+    Offline Queue           0
+    Last Sale               SUBMITTED
+    -------------------------------------------
+
+If offline transactions exist:
+
+    MRA API                 ONLINE
+    Terminal                ACTIVE
+    Configuration           CURRENT
+    Offline Queue           5
+    Synchronization         IN PROGRESS
+
+This helps the cashier/admin identify problems quickly.
+
+======================================================================
+45. RECOMMENDED IMPLEMENTATION ORDER
+======================================================================
+
+Do NOT implement every endpoint at once.
+
+Implement in this order:
+
+PHASE 1 - FOUNDATION
+--------------------
+[ ] Configure BaseUrl
+[ ] Create EISApiClient
+[ ] Configure HttpClient
+[ ] Implement JSON serialization/deserialization
+[ ] Implement common error handling
+[ ] Implement logging
+
+PHASE 2 - ONBOARDING
+--------------------
+[ ] Create TAC screen
+[ ] Create activation DTO
+[ ] Call activation endpoint
+[ ] Parse response
+[ ] Save configuration
+[ ] Send activation confirmation
+[ ] Show activation result
+
+PHASE 3 - CONFIGURATION
+-----------------------
+[ ] Create EF Core configuration entities
+[ ] Create database migration
+[ ] Implement Get Latest Configuration
+[ ] Save/update configuration
+[ ] Store version numbers
+[ ] Handle shouldDownloadLatestConfig
+
+PHASE 4 - ONLINE SALES
+----------------------
+[ ] Create EIS sale DTO
+[ ] Map POS sale to EIS sale
+[ ] Submit sale
+[ ] Save MRA response
+[ ] Store validation information
+[ ] Generate required QR
+[ ] Print receipt
+
+PHASE 5 - RECONCILIATION
+------------------------
+[ ] Implement Last Submitted Online Transaction
+[ ] Handle unknown transactions
+[ ] Prevent duplicate submission
+[ ] Implement Last Submitted Offline Transaction
+
+PHASE 6 - OFFLINE
+-----------------
+[ ] Create OfflineTransaction table
+[ ] Read offline limits
+[ ] Check offline eligibility
+[ ] Queue eligible transactions
+[ ] Generate required offline validation QR
+[ ] Synchronize queue
+[ ] Reconcile submitted transactions
+
+PHASE 7 - UTILITIES
+-------------------
+[ ] Ping
+[ ] Product Status
+[ ] Terminal Site Products/Services
+[ ] Initial Inventory Upload
+[ ] VAT 5 Certificate Validation
+[ ] Terminal Blocking Message
+[ ] Terminal Unblock Status
+
+PHASE 8 - TESTING
+-----------------
+[ ] Activation tests
+[ ] Invalid TAC test
+[ ] Configuration update test
+[ ] Online sale test
+[ ] API timeout test
+[ ] Power failure simulation
+[ ] Offline sale test
+[ ] Offline synchronization test
+[ ] Duplicate transaction test
+[ ] QR validation test
+[ ] Blocking/unblocking test
+[ ] Product status test
+
+======================================================================
+46. TESTING STRATEGY
+======================================================================
+
+Create a test matrix.
+
+TEST 1: VALID ACTIVATION
+------------------------
+Input:
+Valid TAC
+
+Expected:
+Configuration returned
+Configuration saved
+Activation confirmation succeeds
+Terminal becomes active
+
+TEST 2: INVALID TAC
+-------------------
+Input:
+Invalid TAC
+
+Expected:
+Activation rejected
+No terminal activation
+Useful error displayed
+
+TEST 3: CONFIGURATION UPDATE
+----------------------------
+Action:
+MRA configuration changes
+
+Expected:
+POS calls Get Latest Configuration
+Local configuration is updated
+
+TEST 4: NORMAL ONLINE SALE
+--------------------------
+Action:
+Customer purchases product
+
+Expected:
+Local sale saved
+MRA receives transaction
+Response saved
+QR generated
+Receipt printed
+
+TEST 5: POWER FAILURE DURING SALE
+---------------------------------
+Action:
+Power/application failure during MRA submission
+
+Expected:
+Transaction becomes uncertain
+On restart, reconciliation occurs
+POS checks Last Submitted Online Transaction
+No blind duplicate submission
+
+TEST 6: OFFLINE SALE
+--------------------
+Action:
+MRA unavailable
+
+Expected:
+POS checks offline eligibility
+Transaction is queued if permitted
+Required offline validation data/QR is generated
+Receipt is printed
+
+TEST 7: OFFLINE SYNCHRONIZATION
+--------------------------------
+Action:
+Internet restored
+
+Expected:
+Pending offline transactions are submitted
+Responses are recorded
+Transactions are marked appropriately
+
+TEST 8: CONFIGURATION FLAG
+--------------------------
+Action:
+MRA sale response says:
+shouldDownloadLatestConfig = true
+
+Expected:
+POS retrieves latest configuration
+
+TEST 9: PRODUCT STATUS
+----------------------
+Action:
+Query a product
+
+Expected:
+MRA product mapping/status and stock information are handled correctly
+
+TEST 10: TERMINAL BLOCK
+-----------------------
+Action:
+MRA indicates terminal is blocked
+
+Expected:
+POS follows MRA blocking requirements
+POS does not bypass the restriction
+
+======================================================================
+47. COMMON MISTAKES TO AVOID
+======================================================================
+
+1. Hardcoding MRA URLs everywhere.
+
+2. Sending activation confirmation before saving configuration.
+
+3. Storing the TAC as if it were a permanent credential.
+
+4. Ignoring configuration versions.
+
+5. Ignoring shouldDownloadLatestConfig.
+
+6. Treating every API failure as permission to sell offline.
+
+7. Inventing an offline QR algorithm.
+
+8. Inventing a QR payload format.
+
+9. Logging terminal security keys.
+
+10. Sending duplicate transactions after an uncertain response.
+
+11. Deleting transaction records immediately after successful submission.
+
+12. Putting all API code inside XAML code-behind.
+
+13. Using the POS database model directly as the MRA request model.
+
+14. Hardcoding MRA tax rates.
+
+15. Assuming a successful Ping guarantees every subsequent request will
+    succeed.
+
+======================================================================
+48. RECOMMENDED HIGH-LEVEL ARCHITECTURE
+======================================================================
+
+The final architecture should look like:
+
+                    POS UI
+                      |
+        +-------------+-------------+
+        |             |             |
+        v             v             v
+     Sales        Products      Settings
+        |             |             |
+        +-------------+-------------+
+                      |
+                      v
+                EIS SERVICES
+                      |
+       +--------------+--------------+
+       |              |              |
+       v              v              v
+   Activation    Configuration     Sales
+       |              |              |
+       +--------------+--------------+
+                      |
+                      v
+              Offline / Queue
+                      |
+                      v
+                Reconciliation
+                      |
+                      v
+                EIS API CLIENT
+                      |
+                      v
+                HTTP / HTTPS
+                      |
+                      v
+                 MRA EIS API
+
+                    +
+                    |
+                    v
+              LOCAL DATABASE
+                    |
+       +------------+------------+
+       |            |            |
+       v            v            v
+   POS Sales   EIS Config    EIS Logs
+
+======================================================================
+49. PRACTICAL FIRST MILESTONE
+======================================================================
+
+For your current RetailPOS project, do not start with offline sales.
+
+Your first working milestone should be:
+
+    1. Create EISApiClient
+    2. Configure MRA BaseUrl
+    3. Create Terminal Activation screen
+    4. Enter TAC
+    5. Send activation request
+    6. Receive configuration
+    7. Save configuration using EF Core
+    8. Send activation confirmation
+    9. Show "Terminal Activated"
+   10. On next application startup, call Get Latest Configuration
+
+Once this works, you will have established the complete foundation for
+the remaining EIS functionality.
+
+======================================================================
+50. SECOND MILESTONE
+======================================================================
+
+After activation and configuration work:
+
+    1. Create POS Sale
+    2. Save Sale locally
+    3. Map Sale to MRA Sale DTO
+    4. Submit sale
+    5. Save MRA response
+    6. Process validation data
+    7. Generate required QR
+    8. Print receipt
+    9. Handle shouldDownloadLatestConfig
+   10. Implement Last Submitted Online Transaction
+
+======================================================================
+51. THIRD MILESTONE
+======================================================================
+
+Only after online sales work correctly:
+
+    1. Implement offline queue
+    2. Implement offline limits
+    3. Implement required offline validation mechanism
+    4. Implement synchronization
+    5. Implement Last Submitted Offline Transaction
+    6. Implement reconciliation
+    7. Test power failure scenarios
+
+======================================================================
+52. FINAL INTEGRATION FLOW
+======================================================================
+
+The finished POS should behave approximately like this:
+
+START
+ |
+ v
+Load database
+ |
+ v
+Check terminal activation
+ |
+ +---- Not Activated ----> TAC Activation
+ |                           |
+ |                           v
+ |                      Save Config
+ |                           |
+ |                           v
+ |                      Confirm Activation
+ |
+ +---- Activated --------> Get Latest Config
+                              |
+                              v
+                       Check EIS Status
+                              |
+                              v
+                         POS READY
+                              |
+                              v
+                          SALE
+                              |
+                              v
+                    Save local transaction
+                              |
+                              v
+                       Submit to MRA
+                         /       \
+                       /           \
+                  SUCCESS         FAILURE
+                    |                |
+                    v                v
+              Save response     Check offline
+                    |            eligibility
+                    |                |
+                    |           +----+----+
+                    |           |         |
+                    |         YES         NO
+                    |           |         |
+                    |           v         v
+                    |        Queue      Handle
+                    |        offline    error
+                    |           |
+                    +-----+-----+
+                          |
+                          v
+                   Generate required
+                     receipt QR
+                          |
+                          v
+                    Print Receipt
+                          |
+                          v
+                  Check config flag
+                          |
+                          v
+                Download config if needed
+                          |
+                          v
+                        DONE
+
+======================================================================
+53. FINAL NOTES
+======================================================================
+
+The MRA EIS integration is not just a single API call. It is a complete
+terminal lifecycle consisting of:
+
+    ONBOARDING
+       |
+       v
+    CONFIGURATION
+       |
+       v
+    SALES
+       |
+       v
+    QR / RECEIPT
+       |
+       v
+    OFFLINE QUEUE
+       |
+       v
+    SYNCHRONIZATION
+       |
+       v
+    RECONCILIATION
+       |
+       v
+    COMPLIANCE / UTILITIES
+
+The most important engineering principle is to keep MRA integration
+separate from the POS user interface.
+
+Build the integration as services, use DTOs for MRA requests/responses,
+use Entity Framework Core for persistent local data, and maintain a
+clear transaction state so that power failures, network failures,
+configuration changes, and duplicate submissions can be handled safely.
+
+For the exact endpoint implementation, always use the official MRA EIS
+documentation as the source of truth for:
+
+- Endpoint paths
+- HTTP methods
+- Request schemas
+- Response schemas
+- Authorization headers
+- Required fields
+- Error codes
+- Validation rules
+- QR format
+- Offline algorithm
+- Security/key handling
+- Transaction sequencing
+- Retry rules
+- Terminal blocking rules
+
+======================================================================
+END OF GUIDE
+======================================================================
