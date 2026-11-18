@@ -372,6 +372,7 @@
     <Compile Include="Services\EIS\EISSalesService.cs" />
     <Compile Include="Services\EIS\EISStockService.cs" />
     <Compile Include="Services\EIS\TerminalActivationService.cs" />
+    <Compile Include="Settings.cs" />
     <Compile Include="SqlServerTypes\Loader.cs" />
     <Compile Include="UI\frmTerminalActivation.cs">
       <SubType>Form</SubType>
